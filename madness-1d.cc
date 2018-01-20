@@ -4,21 +4,19 @@
 #include <cmath> // pow
 #include "legion.h"
 
-using namespace LegionRuntime::HighLevel;
-using namespace LegionRuntime::Accessor;
+using namespace Legion;
 using namespace std;
-
 
 enum TASK_IDs {
    TOP_LEVEL_TASK_ID,
    REFINE_TASK_ID,
+   SET_TASK_ID,
    PRINT_TASK_ID,
 };
 
 enum FieldIDs {
-   FID_X;
+   FID_X,
 };
-
 
 struct Arguments {
    /* level of the node in the binary tree. Root is at level 0 */
@@ -31,27 +29,59 @@ struct Arguments {
 
    int max_depth;
 
+   coord_t idx;
+
+   drand48_data gen;
+
    // Constructor
-   Arguments(int n = 0, int l = 0, int max_depth = 32) : n(n), l(l), max_depth(max_depth) {}
+   Arguments(int _n = 0, int _l = 0, int _max_depth = 32, coord_t _idx = 0LL)
+     : n(_n), l(_l), max_depth(_max_depth), idx(_idx)
+   {}
 };
 
+struct SetTaskArgs {
+  int node_value;
+  coord_t idx;
+  SetTaskArgs(int _node_value, coord_t _idx) : node_value(_node_value), idx(_idx) {}
+};
+
+//   k=1 (1 subregion per node)
+//                0
+//         1             8
+//     2      5      9      12
+//   3   4  6   7  10  11  13   14
+//
+//       i              (n, l)
+//    il    ir   (n+1, 2*l)  (n+1, 2*l+1)
+//
+//    il = i + 1
+//    ir = i + 2^(max_level -l)
+//
+//    when each subtree holds k levels
+//    [i .. i+(2^k-1)-1]
+//    0 <= j <= 2^k-1 => [i+(2^k-1)-1 + 1 +  j      * (2^(max_level - (l + k) +1) - 1) ..
+//                        i+(2^k-1)-1 + 1 + (j + 1) * (2^(max_level - (l + k) +1) - 1) - 1]
 void top_level_task(const Task *task,
                     const std::vector<PhysicalRegion> &regions,
                     Context ctx, HighLevelRuntime *runtime) {
 
 
-   int max_depth = 32;
+   int max_depth = 4;
+   long int seed = 12345;
    {
       const InputArgs &command_args = HighLevelRuntime::get_input_args();
-      if (command_args.argc > 1) {
-         max_depth = atoi(command_args.argv[1]);
+      for (int idx = 1; idx < command_args.argc; ++idx)
+      {
+        if (strcmp(command_args.argv[idx], "-max_depth") == 0)
+          max_depth = atoi(command_args.argv[++idx]);
+        else if (strcmp(command_args.argv[idx], "-seed") == 0)
+          seed = atol(command_args.argv[++idx]);
       }
    }
 
-
    // TODO: to be verified by Wonchan
-   Rect<2> tree_rect(Point<2>(0, 0) /*min_n = 0, min_l = 0*/, Point<2>(max_depth, static_cast<int>(pow(2, max_depth)) - 1) /*max_n = max_depth, max_l = (2 ^ max_depth) - 1*/);
-   IndexSpace is = runtime->create_index_space(ctx, Domain::from_rect<2>(tree_rect));
+   Rect<1> tree_rect(0LL, static_cast<coord_t>(pow(2, max_depth + 1)) - 2);
+   IndexSpace is = runtime->create_index_space(ctx, tree_rect);
    FieldSpace fs = runtime->create_field_space(ctx);
    {
       FieldAllocator allocator = runtime->create_field_allocator(ctx, fs);
@@ -59,19 +89,20 @@ void top_level_task(const Task *task,
    }
 
    LogicalRegion lr = runtime->create_logical_region(ctx, is, fs);
-   struct Arguments args(0, 0, max_depth); 
-   
+   Arguments args(0, 0, max_depth, 0);
+   srand48_r(seed, &args.gen);
+
    // Launching the refine task
-   TaskLauncher refine_launcher(REFINE_TASK_ID, TaskArgument(&args, sizeof(struct Arguments)));
+   TaskLauncher refine_launcher(REFINE_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
    refine_launcher.add_region_requirement(RegionRequirement(lr, WRITE_DISCARD, EXCLUSIVE, lr));
    refine_launcher.add_field(0, FID_X);
    runtime->execute_task(ctx, refine_launcher);
 
    // Launching another task to print the values of the binary tree nodes
-   TaskLauncher print_launcher(PRINT_TASK_ID, TaskArgument(&args, sizeof(struct Arguments)));
-   print_launcher.add_region_requirement(RegionRequirement(lr, READ_ONLY, EXCLUSIVE, lr));
-   print_launcher.add_field(0, FID_X);
-   runtime->execute_task(ctx, print_launcher);
+   //TaskLauncher print_launcher(PRINT_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
+   //print_launcher.add_region_requirement(RegionRequirement(lr, READ_ONLY, EXCLUSIVE, lr));
+   //print_launcher.add_field(0, FID_X);
+   //runtime->execute_task(ctx, print_launcher);
 
 
    // Destroying allocated memory
@@ -116,48 +147,131 @@ void top_level_task(const Task *task,
  * */
 
 
+void set_task(const Task *task,
+              const std::vector<PhysicalRegion> &regions,
+              Context ctx, HighLevelRuntime *runtime) {
+
+  SetTaskArgs args = *(const SetTaskArgs *) task->args;
+  assert(regions.size() == 1);
+  const FieldAccessor<WRITE_DISCARD,int,1> write_acc(regions[0], FID_X);
+  write_acc[args.idx] = args.node_value;
+}
 
 // To be recursive task calling for the left and right subtrees, if necessary !
 void refine_task(const Task *task,
                  const std::vector<PhysicalRegion> &regions,
                  Context ctx, HighLevelRuntime *runtime) {
 
-
-   struct Arguments args = *(const struct Arguments *) task->args;
+   Arguments args = task->is_index_space ? *(const Arguments *) task->local_args
+                                         : *(const Arguments *) task->args;
    int n = args.n;
    int l = args.l;
    int max_depth = args.max_depth;
+   coord_t idx = args.idx;
 
-   int node_value = (rand() % 10) + 1;
-   if (node_value <= 3 || n >= max_depth) {
-      // TODO: To be completed
-      // store in the hash_map (n, l) --> node_value;
+   assert(regions.size() == 1);
+   LogicalRegion lr = regions[0].get_logical_region();
+   LogicalPartition lp = LogicalPartition::NO_PART;
+   LogicalRegion my_sub_tree_lr = lr;
+
+   DomainPoint my_sub_tree_color(Point<1>(0LL));
+   DomainPoint left_sub_tree_color(Point<1>(1LL));
+   DomainPoint right_sub_tree_color(Point<1>(2LL));
+   coord_t idx_left_sub_tree = 0LL;
+   coord_t idx_right_sub_tree = 0LL;
+
+   if (n < max_depth)
+   {
+     IndexSpace is = lr.get_index_space();
+     DomainPointColoring coloring;
+
+     idx_left_sub_tree = idx + 1;
+     idx_right_sub_tree = idx + static_cast<coord_t>(pow(2, max_depth - n));
+
+     Rect<1> my_sub_tree_rect(idx, idx);
+     Rect<1> left_sub_tree_rect(idx_left_sub_tree, idx_right_sub_tree - 1);
+     Rect<1> right_sub_tree_rect(idx_right_sub_tree,
+                                 idx_right_sub_tree + static_cast<coord_t>(pow(2, max_depth - n)) - 2);
+     fprintf(stderr, "(n: %d, l: %d) - idx: [%lld, %lld] (max_depth: %d)\n"
+                     "  |-- (n: %d, l: %d) - idx: [%lld, %lld] (max_depth: %d)\n"
+                     "  |-- (n: %d, l: %d) - idx: [%lld, %lld] (max_depth: %d)\n",
+         n, l, idx, idx, max_depth,
+         n + 1, 2 * l,     left_sub_tree_rect.lo[0],  left_sub_tree_rect.hi[0],  max_depth,
+         n + 1, 2 * l + 1, right_sub_tree_rect.lo[0], right_sub_tree_rect.hi[0], max_depth);
+
+     coloring[my_sub_tree_color] = my_sub_tree_rect;
+     coloring[left_sub_tree_color] = left_sub_tree_rect;
+     coloring[right_sub_tree_color] = right_sub_tree_rect;
+
+     Rect<1> color_space = Rect<1>(my_sub_tree_color, right_sub_tree_color);
+
+     IndexPartition ip = runtime->create_index_partition(ctx, is, color_space, coloring, DISJOINT_KIND);
+     lp = runtime->get_logical_partition(ctx, lr, ip);
+     my_sub_tree_lr = runtime->get_logical_subregion_by_color(ctx, lp, my_sub_tree_color);
    }
-   else {
-      // TODO: To be completed      
-      // store in the hash_map (n, l) --> ZERO
-     
-      // we have only two subtrees --> Point<1>(0) and Point<1>(1)
-      Rect<1> color_bounds(Point<1>(0), Point<1>(1));
-      Domain color_domain = Domain::from_rect<1>(color_bounds);
+   assert(lr != LogicalRegion::NO_REGION);
+   assert(my_sub_tree_lr != LogicalRegion::NO_REGION);
 
-      IndexPartition ip;
-      DomainColoring coloring;
+   long int node_value;
+   lrand48_r(&args.gen, &node_value);
+   node_value = node_value % 10 + 1;
+   {
+     SetTaskArgs args(node_value, idx);
+     TaskLauncher set_task_launcher(SET_TASK_ID, TaskArgument(&args, sizeof(SetTaskArgs)));
+     RegionRequirement req(my_sub_tree_lr, WRITE_DISCARD, EXCLUSIVE, lr);
+     req.add_field(FID_X);
+     set_task_launcher.add_region_requirement(req);
+     runtime->execute_task(ctx, set_task_launcher);
+   }
 
-      Rect<2> left_sub_tree_rect(Point<2>(n+1, 2 * l), Point<2>(max_depth, static_cast<int>(pow(2, max_depth - 1)) - 1));
-      coloring[0] = Domain::from_rect<2>(left_sub_tree_rect);
-      
-      Rect<2> right_sub_tree_rect(Point<2>(n+1, 2 * l + 1), Point<2>(max_depth, static_cast<int>(pow(2, max_depth)) - 1));
-      coloring[1] = Domain::from_rect<2>(right_sub_tree_rect);
+   if (node_value > 3 && n < max_depth)
+   {
+     assert(lp != LogicalPartition::NO_PART);
+     Rect<1> launch_domain(left_sub_tree_color, right_sub_tree_color);
+     ArgumentMap arg_map;
+     Arguments for_left_sub_tree (n + 1, l * 2    , max_depth, idx_left_sub_tree);
+     Arguments for_right_sub_tree(n + 1, l * 2 + 1, max_depth, idx_right_sub_tree);
 
-      ip = runtime->create_index_partition(ctx, is, color_domain, coloring, true /* disjoint */);
-      LogicalPartition lp = runtime->get_logical_partition(ctx, lr, ip);
+     // Make sure two subtrees use different random number generators
+     long int new_seed;
+     lrand48_r(&args.gen, &new_seed);
+     for_left_sub_tree.gen = args.gen;
+     srand48_r(new_seed, &for_right_sub_tree.gen);
 
-      // TODO: Here, I can't have IndexLauncher as I need to pass (n+1, 2 *l, max_depth) as an argument to one and pass (n+1, 2 * l + 1, max_depth) to another one ! 
+     arg_map.set_point(left_sub_tree_color, TaskArgument(&for_left_sub_tree, sizeof(Arguments)));
+     arg_map.set_point(right_sub_tree_color, TaskArgument(&for_right_sub_tree, sizeof(Arguments)));
 
-
-      // make a new task of refine_task with arguments (n+1, 2 * l) --> left subtree
-      // make a new task of refine_task with arguments (n+1, 2 * l + 1) --> right subtree
+     IndexTaskLauncher refine_launcher(REFINE_TASK_ID, launch_domain, TaskArgument(NULL, 0), arg_map);
+     RegionRequirement req(lp, 0, WRITE_DISCARD, EXCLUSIVE, lr);
+     req.add_field(FID_X);
+     refine_launcher.add_region_requirement(req);
+     runtime->execute_index_space(ctx, refine_launcher);
    }
 }
 
+int main(int argc, char **argv)
+{
+  Runtime::set_top_level_task_id(TOP_LEVEL_TASK_ID);
+
+  {
+    TaskVariantRegistrar registrar(TOP_LEVEL_TASK_ID, "top_level");
+    registrar.add_constraint(ProcessorConstraint(Processor::LOC_PROC));
+    Runtime::preregister_task_variant<top_level_task>(registrar, "top_level");
+  }
+
+  {
+    TaskVariantRegistrar registrar(REFINE_TASK_ID, "refine");
+    registrar.add_constraint(ProcessorConstraint(Processor::LOC_PROC));
+    registrar.set_inner(true);
+    Runtime::preregister_task_variant<refine_task>(registrar, "refine");
+  }
+
+  {
+    TaskVariantRegistrar registrar(SET_TASK_ID, "set");
+    registrar.add_constraint(ProcessorConstraint(Processor::LOC_PROC));
+    registrar.set_leaf(true);
+    Runtime::preregister_task_variant<set_task>(registrar, "set");
+  }
+
+  return Runtime::start(argc, argv);
+}
