@@ -97,7 +97,7 @@ void top_level_task(const Task *task,
     DomainPoint my_sub_tree_color(Point<1>(0LL));
     DomainPoint left_sub_tree_color(Point<1>(1LL));
     DomainPoint right_sub_tree_color(Point<1>(2LL));
-    Color partition_color = AUTO_GENERATE_ID;
+    Color partition_color = 10;
 
     Arguments args(0, 0, max_depth, 0, my_sub_tree_color, left_sub_tree_color, right_sub_tree_color, partition_color);
     srand48_r(seed, &args.gen);
@@ -185,6 +185,7 @@ void refine_task(const Task *task,
     DomainPoint left_sub_tree_color = args.left_sub_tree_color;
     DomainPoint right_sub_tree_color = args.right_sub_tree_color;
     Color partition_color = args.partition_color;
+
     coord_t idx = args.idx;
 
     assert(regions.size() == 1);
@@ -292,7 +293,6 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions,
     int node_value = read_acc[idx];
 
     fprintf(stderr, "(n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
-    fprintf(stderr, " my_sub_tree_color %lld left_sub_tree_color %lld, right_sub_tree_color %lld\n", my_sub_tree_color[0],left_sub_tree_color[0], right_sub_tree_color[0]);
 
     if (node_value == 0) { // The current node is an internal node; launching two sub-task for the left and right subtrees
         LogicalRegion lr = regions[0].get_logical_region();
