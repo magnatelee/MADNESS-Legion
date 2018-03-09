@@ -34,12 +34,14 @@ struct Arguments {
     drand48_data gen;
 
     DomainPoint my_sub_tree_color, left_sub_tree_color, right_sub_tree_color;
+    Color partition_color;
 
     // Constructor
     Arguments(int _n, int _l, int _max_depth, coord_t _idx, DomainPoint _my_sub_tree_color,
-              DomainPoint _left_sub_tree_color, DomainPoint _right_sub_tree_color)
+              DomainPoint _left_sub_tree_color, DomainPoint _right_sub_tree_color, Color _partition_color)
         : n(_n), l(_l), max_depth(_max_depth), idx(_idx), my_sub_tree_color(_my_sub_tree_color),
-          left_sub_tree_color(_left_sub_tree_color), right_sub_tree_color(_right_sub_tree_color)
+          left_sub_tree_color(_left_sub_tree_color), right_sub_tree_color(_right_sub_tree_color), 
+          partition_color(_partition_color)
     {}
 };
 
@@ -95,8 +97,9 @@ void top_level_task(const Task *task,
     DomainPoint my_sub_tree_color(Point<1>(0LL));
     DomainPoint left_sub_tree_color(Point<1>(1LL));
     DomainPoint right_sub_tree_color(Point<1>(2LL));
+    Color partition_color = AUTO_GENERATE_ID;
 
-    Arguments args(0, 0, max_depth, 0, my_sub_tree_color, left_sub_tree_color, right_sub_tree_color);
+    Arguments args(0, 0, max_depth, 0, my_sub_tree_color, left_sub_tree_color, right_sub_tree_color, partition_color);
     srand48_r(seed, &args.gen);
 
     // Launching the refine task
@@ -181,6 +184,7 @@ void refine_task(const Task *task,
     DomainPoint my_sub_tree_color = args.my_sub_tree_color;
     DomainPoint left_sub_tree_color = args.left_sub_tree_color;
     DomainPoint right_sub_tree_color = args.right_sub_tree_color;
+    Color partition_color = args.partition_color;
     coord_t idx = args.idx;
 
     assert(regions.size() == 1);
@@ -190,6 +194,7 @@ void refine_task(const Task *task,
 
     coord_t idx_left_sub_tree = 0LL;
     coord_t idx_right_sub_tree = 0LL;
+
 
     if (n < max_depth)
     {
@@ -217,7 +222,7 @@ void refine_task(const Task *task,
 
         Rect<1> color_space = Rect<1>(my_sub_tree_color, right_sub_tree_color);
 
-        IndexPartition ip = runtime->create_index_partition(ctx, is, color_space, coloring, DISJOINT_KIND);
+        IndexPartition ip = runtime->create_index_partition(ctx, is, color_space, coloring, DISJOINT_KIND, partition_color);
         lp = runtime->get_logical_partition(ctx, lr, ip);
         my_sub_tree_lr = runtime->get_logical_subregion_by_color(ctx, lp, my_sub_tree_color);
     }
@@ -243,9 +248,9 @@ void refine_task(const Task *task,
         Rect<1> launch_domain(left_sub_tree_color, right_sub_tree_color);
         ArgumentMap arg_map;
         Arguments for_left_sub_tree (n + 1, l * 2    , max_depth, idx_left_sub_tree, my_sub_tree_color,
-                                     left_sub_tree_color, right_sub_tree_color);
+                                     left_sub_tree_color, right_sub_tree_color, partition_color);
         Arguments for_right_sub_tree(n + 1, l * 2 + 1, max_depth, idx_right_sub_tree, my_sub_tree_color,
-                                     left_sub_tree_color, right_sub_tree_color);
+                                     left_sub_tree_color, right_sub_tree_color, partition_color);
 
         // Make sure two subtrees use different random number generators
         long int new_seed = 0L;
@@ -277,6 +282,7 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions,
     DomainPoint my_sub_tree_color = args.my_sub_tree_color;
     DomainPoint left_sub_tree_color = args.left_sub_tree_color;
     DomainPoint right_sub_tree_color = args.right_sub_tree_color;
+    Color partition_color = args.partition_color;
 
     LogicalRegion my_sub_tree_lr;
 
@@ -299,18 +305,17 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions,
         ArgumentMap arg_map;
 
         Arguments for_left_sub_tree(n + 1, 2 * l, max_depth, idx_left_sub_tree, my_sub_tree_color,
-                                    left_sub_tree_color, right_sub_tree_color);
+                                    left_sub_tree_color, right_sub_tree_color, partition_color);
         Arguments for_right_sub_tree(n + 1, 2 * l + 1, max_depth, idx_right_sub_tree, my_sub_tree_color,
-                                     left_sub_tree_color, right_sub_tree_color);
+                                     left_sub_tree_color, right_sub_tree_color, partition_color);
 
         arg_map.set_point(left_sub_tree_color, TaskArgument(&for_left_sub_tree, sizeof(Arguments)));
         arg_map.set_point(right_sub_tree_color, TaskArgument(&for_right_sub_tree, sizeof(Arguments)));
 
         IndexTaskLauncher print_launcher(PRINT_TASK_ID, launch_domain, TaskArgument(NULL, 0), arg_map);
 
-        lp = runtime->get_logical_partition_by_color(ctxt, lr, my_sub_tree_color);
-        my_sub_tree_lr = runtime->get_logical_subregion_by_color(ctxt, lp, my_sub_tree_color);
-        RegionRequirement req(lp, 0, READ_ONLY, EXCLUSIVE, my_sub_tree_lr);
+        lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);
+        RegionRequirement req(lp, 0, READ_ONLY, EXCLUSIVE, lr);
         req.add_field(FID_X);
         print_launcher.add_region_requirement(req);
 
