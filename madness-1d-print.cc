@@ -292,10 +292,13 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions,
     const FieldAccessor<READ_ONLY, int, 1> read_acc(regions[0], FID_X);
     int node_value = read_acc[idx];
 
+    LogicalRegion lr = regions[0].get_logical_region();
+    IndexSpace is = lr.get_index_space();
+
     fprintf(stderr, "(n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
 
-    if (node_value == 0) { // The current node is an internal node; launching two sub-task for the left and right subtrees
-        LogicalRegion lr = regions[0].get_logical_region();
+    // Before calling the recursive steps we need to check if the partition does exists or not
+    if (runtime->has_index_partition(ctxt, is, partition_color)) {
         LogicalPartition lp = LogicalPartition::NO_PART;
 
         coord_t idx_left_sub_tree = idx + 1;
@@ -314,6 +317,7 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions,
 
         IndexTaskLauncher print_launcher(PRINT_TASK_ID, launch_domain, TaskArgument(NULL, 0), arg_map);
 
+        // We should not create a new partition, instead just fetch the existing partition, to avoid creating copy of the whole tree again and again
         lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);
         RegionRequirement req(lp, 0, READ_ONLY, EXCLUSIVE, lr);
         req.add_field(FID_X);
