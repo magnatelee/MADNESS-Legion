@@ -165,7 +165,7 @@ void set_task(const Task *task,
 
     SetTaskArgs args = *(const SetTaskArgs *) task->args;
     assert(regions.size() == 1);
-    const FieldAccessor<WRITE_DISCARD,int,1> write_acc(regions[0], FID_X);
+    const FieldAccessor<WRITE_DISCARD, int, 1> write_acc(regions[0], FID_X);
     if (args.node_value <= 3) {
         write_acc[args.idx] = args.node_value;
     }
@@ -296,37 +296,34 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions,
     DomainPoint right_sub_tree_color(Point<1>(2LL));
     Color partition_color = args.partition_color;
 
+    coord_t idx = args.idx;
+
     LogicalRegion lr = regions[0].get_logical_region();
     IndexSpace is = lr.get_index_space();
 
     LogicalPartition lp = LogicalPartition::NO_PART;
-    LogicalRegion my_sub_tree_lr;
+
+    Future f1;
+    {
+        ReadTaskArgs args(idx);
+        TaskLauncher read_task_launcher(READ_TASK_ID, TaskArgument(&args, sizeof(ReadTaskArgs)));
+        RegionRequirement req(lr, READ_ONLY, EXCLUSIVE, lr);
+        req.add_field(FID_X);
+        read_task_launcher.add_region_requirement(req);
+        f1 = runtime->execute_task(ctxt, read_task_launcher);
+    }
+
+    int node_value = f1.get_result<int>();
+
+    fprintf(stderr, "(n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
 
     // Before calling the recursive steps we need to check if the partition does exists or not
     if (runtime->has_index_partition(ctxt, is, partition_color)) {
-        lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);
-
-        my_sub_tree_lr = runtime->get_logical_subregion_by_color(ctxt, lp, my_sub_tree_color);
-
-        coord_t idx = args.idx;
+        lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);        
 
         // These lines will create an instance for the whole region even though we need only the first element
         // const FieldAccessor<READ_ONLY, int, 1> read_acc(regions[0], FID_X);
         // int node_value = read_acc[idx];
-
-        Future f1;
-        {
-            ReadTaskArgs args(idx);
-            TaskLauncher read_task_launcher(READ_TASK_ID, TaskArgument(&args, sizeof(ReadTaskArgs)));
-            RegionRequirement req(my_sub_tree_lr, READ_ONLY, EXCLUSIVE, lr);
-            req.add_field(FID_X);
-            read_task_launcher.add_region_requirement(req);
-            f1 = runtime->execute_task(ctxt, read_task_launcher);
-        }
-
-        int node_value = f1.get_result<int>();
-
-        fprintf(stderr, "(n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
 
         coord_t idx_left_sub_tree = idx + 1;
         coord_t idx_right_sub_tree = idx + static_cast<coord_t>(pow(2, max_depth - n));
