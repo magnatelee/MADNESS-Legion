@@ -12,6 +12,7 @@ enum TASK_IDs {
     REFINE_TASK_ID,
     SET_TASK_ID,
     PRINT_TASK_ID,
+    READ_TASK_ID
 };
 
 enum FieldIDs {
@@ -33,15 +34,11 @@ struct Arguments {
 
     drand48_data gen;
 
-    DomainPoint my_sub_tree_color, left_sub_tree_color, right_sub_tree_color;
     Color partition_color;
 
     // Constructor
-    Arguments(int _n, int _l, int _max_depth, coord_t _idx, DomainPoint _my_sub_tree_color,
-              DomainPoint _left_sub_tree_color, DomainPoint _right_sub_tree_color, Color _partition_color)
-        : n(_n), l(_l), max_depth(_max_depth), idx(_idx), my_sub_tree_color(_my_sub_tree_color),
-          left_sub_tree_color(_left_sub_tree_color), right_sub_tree_color(_right_sub_tree_color), 
-          partition_color(_partition_color)
+    Arguments(int _n, int _l, int _max_depth, coord_t _idx, Color _partition_color)
+        : n(_n), l(_l), max_depth(_max_depth), idx(_idx), partition_color(_partition_color)
     {}
 };
 
@@ -49,6 +46,11 @@ struct SetTaskArgs {
     int node_value;
     coord_t idx;
     SetTaskArgs(int _node_value, coord_t _idx) : node_value(_node_value), idx(_idx) {}
+};
+
+struct ReadTaskArgs {
+    coord_t idx;
+    ReadTaskArgs(coord_t _idx) : idx(_idx) {}
 };
 
 //   k=1 (1 subregion per node)
@@ -97,9 +99,11 @@ void top_level_task(const Task *task,
     DomainPoint my_sub_tree_color(Point<1>(0LL));
     DomainPoint left_sub_tree_color(Point<1>(1LL));
     DomainPoint right_sub_tree_color(Point<1>(2LL));
+
+    // Any random value will work
     Color partition_color = 10;
 
-    Arguments args(0, 0, max_depth, 0, my_sub_tree_color, left_sub_tree_color, right_sub_tree_color, partition_color);
+    Arguments args(0, 0, max_depth, 0, partition_color);
     srand48_r(seed, &args.gen);
 
     // Launching the refine task
@@ -170,10 +174,19 @@ void set_task(const Task *task,
     }
 }
 
+int read_task(const Task *task,
+              const std::vector<PhysicalRegion> &regions,
+              Context ctx, HighLevelRuntime *runtime) {
+
+    ReadTaskArgs args = *(const ReadTaskArgs *) task->args;
+    assert(regions.size() == 1);
+    const FieldAccessor<READ_ONLY, int, 1> read_acc(regions[0], FID_X);
+    // fprintf(stderr, "read_acc[args.idx] %d\n", read_acc[args.idx]);
+    return read_acc[args.idx];
+}
+
 // To be recursive task calling for the left and right subtrees, if necessary !
-void refine_task(const Task *task,
-                 const std::vector<PhysicalRegion> &regions,
-                 Context ctx, HighLevelRuntime *runtime) {
+void refine_task(const Task *task, const std::vector<PhysicalRegion> &regions, Context ctx, HighLevelRuntime *runtime) {
 
     Arguments args = task->is_index_space ? *(const Arguments *) task->local_args
     : *(const Arguments *) task->args;
@@ -181,9 +194,9 @@ void refine_task(const Task *task,
     int l = args.l;
     int max_depth = args.max_depth;
 
-    DomainPoint my_sub_tree_color = args.my_sub_tree_color;
-    DomainPoint left_sub_tree_color = args.left_sub_tree_color;
-    DomainPoint right_sub_tree_color = args.right_sub_tree_color;
+    DomainPoint my_sub_tree_color(Point<1>(0LL));
+    DomainPoint left_sub_tree_color(Point<1>(1LL));
+    DomainPoint right_sub_tree_color(Point<1>(2LL));
     Color partition_color = args.partition_color;
 
     coord_t idx = args.idx;
@@ -248,10 +261,8 @@ void refine_task(const Task *task,
         assert(lp != LogicalPartition::NO_PART);
         Rect<1> launch_domain(left_sub_tree_color, right_sub_tree_color);
         ArgumentMap arg_map;
-        Arguments for_left_sub_tree (n + 1, l * 2    , max_depth, idx_left_sub_tree, my_sub_tree_color,
-                                     left_sub_tree_color, right_sub_tree_color, partition_color);
-        Arguments for_right_sub_tree(n + 1, l * 2 + 1, max_depth, idx_right_sub_tree, my_sub_tree_color,
-                                     left_sub_tree_color, right_sub_tree_color, partition_color);
+        Arguments for_left_sub_tree (n + 1, l * 2    , max_depth, idx_left_sub_tree, partition_color);
+        Arguments for_right_sub_tree(n + 1, l * 2 + 1, max_depth, idx_right_sub_tree, partition_color);
 
         // Make sure two subtrees use different random number generators
         long int new_seed = 0L;
@@ -280,26 +291,42 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions,
     l = args.l,
     max_depth = args.max_depth;
 
-    DomainPoint my_sub_tree_color = args.my_sub_tree_color;
-    DomainPoint left_sub_tree_color = args.left_sub_tree_color;
-    DomainPoint right_sub_tree_color = args.right_sub_tree_color;
+    DomainPoint my_sub_tree_color(Point<1>(0LL));
+    DomainPoint left_sub_tree_color(Point<1>(1LL));
+    DomainPoint right_sub_tree_color(Point<1>(2LL));
     Color partition_color = args.partition_color;
-
-    LogicalRegion my_sub_tree_lr;
-
-    coord_t idx = args.idx;
-
-    const FieldAccessor<READ_ONLY, int, 1> read_acc(regions[0], FID_X);
-    int node_value = read_acc[idx];
 
     LogicalRegion lr = regions[0].get_logical_region();
     IndexSpace is = lr.get_index_space();
 
-    fprintf(stderr, "(n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
+    LogicalPartition lp = LogicalPartition::NO_PART;
+    LogicalRegion my_sub_tree_lr;
 
     // Before calling the recursive steps we need to check if the partition does exists or not
     if (runtime->has_index_partition(ctxt, is, partition_color)) {
-        LogicalPartition lp = LogicalPartition::NO_PART;
+        lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);
+
+        my_sub_tree_lr = runtime->get_logical_subregion_by_color(ctxt, lp, my_sub_tree_color);
+
+        coord_t idx = args.idx;
+
+        // These lines will create an instance for the whole region even though we need only the first element
+        // const FieldAccessor<READ_ONLY, int, 1> read_acc(regions[0], FID_X);
+        // int node_value = read_acc[idx];
+
+        Future f1;
+        {
+            ReadTaskArgs args(idx);
+            TaskLauncher read_task_launcher(READ_TASK_ID, TaskArgument(&args, sizeof(ReadTaskArgs)));
+            RegionRequirement req(my_sub_tree_lr, READ_ONLY, EXCLUSIVE, lr);
+            req.add_field(FID_X);
+            read_task_launcher.add_region_requirement(req);
+            f1 = runtime->execute_task(ctxt, read_task_launcher);
+        }
+
+        int node_value = f1.get_result<int>();
+
+        fprintf(stderr, "(n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
 
         coord_t idx_left_sub_tree = idx + 1;
         coord_t idx_right_sub_tree = idx + static_cast<coord_t>(pow(2, max_depth - n));
@@ -307,18 +334,17 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions,
         Rect<1> launch_domain(left_sub_tree_color, right_sub_tree_color);
         ArgumentMap arg_map;
 
-        Arguments for_left_sub_tree(n + 1, 2 * l, max_depth, idx_left_sub_tree, my_sub_tree_color,
-                                    left_sub_tree_color, right_sub_tree_color, partition_color);
-        Arguments for_right_sub_tree(n + 1, 2 * l + 1, max_depth, idx_right_sub_tree, my_sub_tree_color,
-                                     left_sub_tree_color, right_sub_tree_color, partition_color);
+        Arguments for_left_sub_tree(n + 1, 2 * l, max_depth, idx_left_sub_tree, partition_color);
+        Arguments for_right_sub_tree(n + 1, 2 * l + 1, max_depth, idx_right_sub_tree, partition_color);
 
         arg_map.set_point(left_sub_tree_color, TaskArgument(&for_left_sub_tree, sizeof(Arguments)));
         arg_map.set_point(right_sub_tree_color, TaskArgument(&for_right_sub_tree, sizeof(Arguments)));
 
+        // It calls print task twice for both the sub lp's lp[1], lp[2]
         IndexTaskLauncher print_launcher(PRINT_TASK_ID, launch_domain, TaskArgument(NULL, 0), arg_map);
 
         // We should not create a new partition, instead just fetch the existing partition, to avoid creating copy of the whole tree again and again
-        lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);
+        // this partition color is the same color that we specified in the refine task while creating the index partition
         RegionRequirement req(lp, 0, READ_ONLY, EXCLUSIVE, lr);
         req.add_field(FID_X);
         print_launcher.add_region_requirement(req);
@@ -357,6 +383,13 @@ int main(int argc, char **argv)
         TaskVariantRegistrar registrar(PRINT_TASK_ID, "print");
         registrar.add_constraint(ProcessorConstraint(Processor::LOC_PROC));
         Runtime::preregister_task_variant<print_task>(registrar, "print");
+    }
+
+    {
+        TaskVariantRegistrar registrar(READ_TASK_ID, "read");
+        registrar.add_constraint(ProcessorConstraint(Processor::LOC_PROC));
+        registrar.set_leaf(true);
+        Runtime::preregister_task_variant<int, read_task>(registrar, "read");
     }
 
     return Runtime::start(argc, argv);
