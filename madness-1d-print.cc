@@ -119,7 +119,11 @@ void top_level_task(const Task *task,
     refine_launcher.add_field(0, FID_X);
     runtime->execute_task(ctx, refine_launcher);
 
-    // // Launcmexecute_task(ctx, print_launcher);
+    // Launching another task to print the values of the binary tree nodes
+    TaskLauncher print_launcher(PRINT_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
+    print_launcher.add_region_requirement(RegionRequirement(lr, READ_ONLY, EXCLUSIVE, lr));
+    print_launcher.add_field(0, FID_X);
+    runtime->execute_task(ctx, print_launcher);
 
     // Launching another task to print the values of the binary tree nodes
     TaskLauncher compress_launcher(COMPRESS_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
@@ -127,7 +131,13 @@ void top_level_task(const Task *task,
     compress_launcher.add_field(0, FID_X);
     runtime->execute_task(ctx, compress_launcher);
 
-    // runtime->execute_task(ctx, print_launcher);
+    // fprintf(stderr, "\n------------- after compressing ------------\n");
+
+    // Launching another task to print the values of the binary tree nodes
+    TaskLauncher print_launcher1(PRINT_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
+    print_launcher1.add_region_requirement(RegionRequirement(lr, READ_ONLY, EXCLUSIVE, lr));
+    print_launcher1.add_field(0, FID_X);
+    runtime->execute_task(ctx, print_launcher1);
 
     // Destroying allocated memory
     runtime->destroy_logical_region(ctx, lr);
@@ -202,6 +212,7 @@ void compress_set_task(const Task *task,
     CompressSetTaskArgs args = *(const CompressSetTaskArgs *) task->args;
     assert(regions.size() == 1);
     const FieldAccessor<READ_WRITE, int, 1> write_acc(regions[0], FID_X);
+    // fprintf(stderr, "left value %d right value %d\n", write_acc[args.left_idx], write_acc[args.right_idx]);
     write_acc[args.idx] = write_acc[args.left_idx] + write_acc[args.right_idx];
 }
 
@@ -346,17 +357,16 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
         compress_launcher.add_region_requirement(req);
         runtime->execute_index_space(ctxt, compress_launcher);
 
-    }
+        {
+            CompressSetTaskArgs args(idx, idx_left_sub_tree, idx_right_sub_tree);
+            TaskLauncher compress_set_task_launcher(COMPRESS_SET_TASK_ID, TaskArgument(&args, sizeof(CompressSetTaskArgs)));
+            RegionRequirement req(lr, READ_WRITE, EXCLUSIVE, lr);
+            req.add_field(FID_X);
+            compress_set_task_launcher.add_region_requirement(req);
+            runtime->execute_task(ctxt, compress_set_task_launcher);
+        }
 
-    {
-        CompressSetTaskArgs args(idx, idx_left_sub_tree, idx_right_sub_tree);
-        TaskLauncher compress_set_task_launcher(COMPRESS_SET_TASK_ID, TaskArgument(&args, sizeof(CompressSetTaskArgs)));
-        RegionRequirement req(lr, READ_WRITE, EXCLUSIVE, lr);
-        req.add_field(FID_X);
-        compress_set_task_launcher.add_region_requirement(req);
-        runtime->execute_task(ctxt, compress_set_task_launcher);
     }
-
 
 
 }
@@ -471,7 +481,7 @@ int main(int argc, char **argv)
     {
         TaskVariantRegistrar registrar(COMPRESS_TASK_ID, "compress");
         registrar.add_constraint(ProcessorConstraint(Processor::LOC_PROC));
-        registrar.set_leaf(true);
+        registrar.set_inner(true);
         Runtime::preregister_task_variant<compress_task>(registrar, "compress");
     }
 
