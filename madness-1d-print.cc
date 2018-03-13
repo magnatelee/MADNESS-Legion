@@ -317,13 +317,13 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions,
 
     fprintf(stderr, "(n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
 
-    // Before calling the recursive steps we need to check if the partition does exists or not
-    if (runtime->has_index_partition(ctxt, is, partition_color)) {
-        lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);        
+    // These lines will create an instance for the whole region even though we need only the first element
+    // const FieldAccessor<READ_ONLY, int, 1> read_acc(regions[0], FID_X);
+    // int node_value = read_acc[idx];
 
-        // These lines will create an instance for the whole region even though we need only the first element
-        // const FieldAccessor<READ_ONLY, int, 1> read_acc(regions[0], FID_X);
-        // int node_value = read_acc[idx];
+    // Before calling the recursive check if the current level of the root of your subtree is smaller than the max level
+    if (node_value == 0 && n < max_depth) {
+        lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);        
 
         coord_t idx_left_sub_tree = idx + 1;
         coord_t idx_right_sub_tree = idx + static_cast<coord_t>(pow(2, max_depth - n));
