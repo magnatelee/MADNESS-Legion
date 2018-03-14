@@ -331,12 +331,23 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
     assert(regions.size() == 1);
     LogicalRegion lr = regions[0].get_logical_region();
     LogicalPartition lp = LogicalPartition::NO_PART;
-    IndexSpace is = lr.get_index_space();
 
     coord_t idx_left_sub_tree = 0LL;
     coord_t idx_right_sub_tree = 0LL;
 
-    if (runtime->has_index_partition(ctxt, is, partition_color)) {
+    Future f1;
+    {
+        ReadTaskArgs args(idx);
+        TaskLauncher read_task_launcher(READ_TASK_ID, TaskArgument(&args, sizeof(ReadTaskArgs)));
+        RegionRequirement req(lr, READ_ONLY, EXCLUSIVE, lr);
+        req.add_field(FID_X);
+        read_task_launcher.add_region_requirement(req);
+        f1 = runtime->execute_task(ctxt, read_task_launcher);
+    }
+
+    int node_value = f1.get_result<int>();
+
+    if (node_value == 0 && n < max_depth) {
         lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);        
 
         idx_left_sub_tree = idx + 1;
@@ -388,7 +399,6 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions, Co
     coord_t idx = args.idx;
 
     LogicalRegion lr = regions[0].get_logical_region();
-    IndexSpace is = lr.get_index_space();
 
     LogicalPartition lp = LogicalPartition::NO_PART;
 
