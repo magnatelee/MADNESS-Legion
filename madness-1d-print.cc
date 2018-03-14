@@ -12,7 +12,9 @@ enum TASK_IDs {
     REFINE_TASK_ID,
     SET_TASK_ID,
     PRINT_TASK_ID,
-    READ_TASK_ID
+    READ_TASK_ID,
+    COMPRESS_TASK_ID,
+    COMPRESS_SET_TASK_ID
 };
 
 enum FieldIDs {
@@ -51,6 +53,11 @@ struct SetTaskArgs {
 struct ReadTaskArgs {
     coord_t idx;
     ReadTaskArgs(coord_t _idx) : idx(_idx) {}
+};
+
+struct CompressSetTaskArgs {
+    coord_t idx, left_idx, right_idx;
+    CompressSetTaskArgs(coord_t _idx, coord_t _left_idx, coord_t _right_idx) : idx(_idx), left_idx(_left_idx), right_idx(_right_idx){}
 };
 
 //   k=1 (1 subregion per node)
@@ -118,6 +125,20 @@ void top_level_task(const Task *task,
     print_launcher.add_field(0, FID_X);
     runtime->execute_task(ctx, print_launcher);
 
+    // Launching another task to print the values of the binary tree nodes
+    TaskLauncher compress_launcher(COMPRESS_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
+    compress_launcher.add_region_requirement(RegionRequirement(lr, READ_WRITE, EXCLUSIVE, lr));
+    compress_launcher.add_field(0, FID_X);
+    runtime->execute_task(ctx, compress_launcher);
+
+    // fprintf(stderr, "\n------------- after compressing ------------\n");
+
+    // Launching another task to print the values of the binary tree nodes
+    TaskLauncher print_launcher1(PRINT_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
+    print_launcher1.add_region_requirement(RegionRequirement(lr, READ_ONLY, EXCLUSIVE, lr));
+    print_launcher1.add_field(0, FID_X);
+    runtime->execute_task(ctx, print_launcher1);
+
     // Destroying allocated memory
     runtime->destroy_logical_region(ctx, lr);
     runtime->destroy_field_space(ctx, fs);
@@ -181,9 +202,20 @@ int read_task(const Task *task,
     ReadTaskArgs args = *(const ReadTaskArgs *) task->args;
     assert(regions.size() == 1);
     const FieldAccessor<READ_ONLY, int, 1> read_acc(regions[0], FID_X);
-    // fprintf(stderr, "read_acc[args.idx] %d\n", read_acc[args.idx]);
     return read_acc[args.idx];
 }
+
+void compress_set_task(const Task *task,
+                       const std::vector<PhysicalRegion> &regions,
+                       Context ctx, HighLevelRuntime *runtime) {
+
+    CompressSetTaskArgs args = *(const CompressSetTaskArgs *) task->args;
+    assert(regions.size() == 1);
+    const FieldAccessor<READ_WRITE, int, 1> write_acc(regions[0], FID_X);
+    // fprintf(stderr, "left value %d right value %d\n", write_acc[args.left_idx], write_acc[args.right_idx]);
+    write_acc[args.idx] = write_acc[args.left_idx] + write_acc[args.right_idx];
+}
+
 
 // To be recursive task calling for the left and right subtrees, if necessary !
 void refine_task(const Task *task, const std::vector<PhysicalRegion> &regions, Context ctx, HighLevelRuntime *runtime) {
@@ -281,8 +313,76 @@ void refine_task(const Task *task, const std::vector<PhysicalRegion> &regions, C
     }
 }
 
-void print_task(const Task *task, const std::vector<PhysicalRegion> &regions,
-                Context ctxt, HighLevelRuntime *runtime) {
+void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions, Context ctxt, HighLevelRuntime *runtime) {
+    Arguments args = task->is_index_space ? *(const Arguments *) task->local_args
+    : *(const Arguments *) task->args;
+
+    int n = args.n;
+    int l = args.l;
+    int max_depth = args.max_depth;
+
+    DomainPoint my_sub_tree_color(Point<1>(0LL));
+    DomainPoint left_sub_tree_color(Point<1>(1LL));
+    DomainPoint right_sub_tree_color(Point<1>(2LL));
+    Color partition_color = args.partition_color;
+
+    coord_t idx = args.idx;
+
+    assert(regions.size() == 1);
+    LogicalRegion lr = regions[0].get_logical_region();
+    LogicalPartition lp = LogicalPartition::NO_PART;
+
+    coord_t idx_left_sub_tree = 0LL;
+    coord_t idx_right_sub_tree = 0LL;
+
+    Future f1;
+    {
+        ReadTaskArgs args(idx);
+        TaskLauncher read_task_launcher(READ_TASK_ID, TaskArgument(&args, sizeof(ReadTaskArgs)));
+        RegionRequirement req(lr, READ_ONLY, EXCLUSIVE, lr);
+        req.add_field(FID_X);
+        read_task_launcher.add_region_requirement(req);
+        f1 = runtime->execute_task(ctxt, read_task_launcher);
+    }
+
+    int node_value = f1.get_result<int>();
+
+    if (node_value == 0 && n < max_depth) {
+        lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);        
+
+        idx_left_sub_tree = idx + 1;
+        idx_right_sub_tree = idx + static_cast<coord_t>(pow(2, max_depth - n));
+
+        Rect<1> launch_domain(left_sub_tree_color, right_sub_tree_color);
+        ArgumentMap arg_map;
+
+        Arguments for_left_sub_tree(n + 1, 2 * l, max_depth, idx_left_sub_tree, partition_color);
+        Arguments for_right_sub_tree(n + 1, 2 * l + 1, max_depth, idx_right_sub_tree, partition_color);
+
+        arg_map.set_point(left_sub_tree_color, TaskArgument(&for_left_sub_tree, sizeof(Arguments)));
+        arg_map.set_point(right_sub_tree_color, TaskArgument(&for_right_sub_tree, sizeof(Arguments)));
+
+        IndexTaskLauncher compress_launcher(COMPRESS_TASK_ID, launch_domain, TaskArgument(NULL, 0), arg_map);
+        RegionRequirement req(lp, 0, READ_WRITE, EXCLUSIVE, lr);
+        req.add_field(FID_X);
+        compress_launcher.add_region_requirement(req);
+        runtime->execute_index_space(ctxt, compress_launcher);
+
+        {
+            CompressSetTaskArgs args(idx, idx_left_sub_tree, idx_right_sub_tree);
+            TaskLauncher compress_set_task_launcher(COMPRESS_SET_TASK_ID, TaskArgument(&args, sizeof(CompressSetTaskArgs)));
+            RegionRequirement req(lr, READ_WRITE, EXCLUSIVE, lr);
+            req.add_field(FID_X);
+            compress_set_task_launcher.add_region_requirement(req);
+            runtime->execute_task(ctxt, compress_set_task_launcher);
+        }
+
+    }
+
+
+}
+
+void print_task(const Task *task, const std::vector<PhysicalRegion> &regions, Context ctxt, HighLevelRuntime *runtime) {
 
     Arguments args = task->is_index_space ? *(const Arguments *) task->local_args
     : *(const Arguments *) task->args;
@@ -299,7 +399,6 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions,
     coord_t idx = args.idx;
 
     LogicalRegion lr = regions[0].get_logical_region();
-    IndexSpace is = lr.get_index_space();
 
     LogicalPartition lp = LogicalPartition::NO_PART;
 
@@ -387,6 +486,20 @@ int main(int argc, char **argv)
         registrar.add_constraint(ProcessorConstraint(Processor::LOC_PROC));
         registrar.set_leaf(true);
         Runtime::preregister_task_variant<int, read_task>(registrar, "read");
+    }
+
+    {
+        TaskVariantRegistrar registrar(COMPRESS_TASK_ID, "compress");
+        registrar.add_constraint(ProcessorConstraint(Processor::LOC_PROC));
+        registrar.set_inner(true);
+        Runtime::preregister_task_variant<compress_task>(registrar, "compress");
+    }
+
+    {
+        TaskVariantRegistrar registrar(COMPRESS_SET_TASK_ID, "compress_set");
+        registrar.add_constraint(ProcessorConstraint(Processor::LOC_PROC));
+        registrar.set_leaf(true);
+        Runtime::preregister_task_variant<compress_set_task>(registrar, "compress_set");
     }
 
     return Runtime::start(argc, argv);
