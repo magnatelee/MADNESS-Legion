@@ -59,8 +59,10 @@ struct ReadTaskArgs {
 
 struct CompressSetTaskArgs {
     coord_t idx, left_idx, right_idx;
-    bool is_leaf;
-    CompressSetTaskArgs(coord_t _idx, coord_t _left_idx, coord_t _right_idx, bool _is_leaf = false) : idx(_idx), left_idx(_left_idx), right_idx(_right_idx), is_leaf(_is_leaf){}
+    int left_node_value, right_node_value;
+    CompressSetTaskArgs(coord_t _idx, coord_t _left_idx, coord_t _right_idx, int _left_node_value, int _right_node_value) : 
+        idx(_idx), left_idx(_left_idx), right_idx(_right_idx), left_node_value(_left_node_value),
+        right_node_value(_right_node_value){}
 };
 
 //   k=1 (1 subregion per node)
@@ -215,10 +217,12 @@ void compress_set_task(const Task *task,
     CompressSetTaskArgs args = *(const CompressSetTaskArgs *) task->args;
     assert(regions.size() == 1);
     const FieldAccessor<READ_WRITE, int, 1> write_acc(regions[0], FID_X);
-    // fprintf(stderr, "left value %d right value %d\n", write_acc[args.left_idx], write_acc[args.right_idx]);
+
     write_acc[args.idx] = write_acc[args.left_idx] + write_acc[args.right_idx];
-    if (args.is_leaf == true) {
+    if (args.left_node_value == write_acc[args.left_idx]) {
         write_acc[args.left_idx] = 0;
+    }
+    if (args.right_node_value == write_acc[args.right_idx]) {
         write_acc[args.right_idx] = 0;
     }
     
@@ -353,7 +357,29 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
         f1 = runtime->execute_task(ctxt, read_task_launcher);
     }
 
+    Future f_left;
+    {
+        ReadTaskArgs args(idx + 1);
+        TaskLauncher read_task_launcher_left(READ_TASK_ID, TaskArgument(&args, sizeof(ReadTaskArgs)));
+        RegionRequirement req(lr, READ_ONLY, EXCLUSIVE, lr);
+        req.add_field(FID_X);
+        read_task_launcher_left.add_region_requirement(req);
+        f_left = runtime->execute_task(ctxt, read_task_launcher_left);
+    }
+
+    Future f_right;
+    {
+        ReadTaskArgs args(idx + static_cast<coord_t>(pow(2, max_depth - n)));
+        TaskLauncher read_task_launcher_right(READ_TASK_ID, TaskArgument(&args, sizeof(ReadTaskArgs)));
+        RegionRequirement req(lr, READ_ONLY, EXCLUSIVE, lr);
+        req.add_field(FID_X);
+        read_task_launcher_right.add_region_requirement(req);
+        f_right = runtime->execute_task(ctxt, read_task_launcher_right);
+    }
+
     int node_value = f1.get_result<int>();
+    int left_node_value = f_left.get_result<int>();
+    int right_node_value = f_right.get_result<int>();
 
     if (node_value == 0 && n < max_depth) {
         lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);        
@@ -376,13 +402,8 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
         compress_launcher.add_region_requirement(req);
         runtime->execute_index_space(ctxt, compress_launcher);
 
-        bool is_leaf = false;
-        if(n == max_depth - 1) {
-            is_leaf = true;
-        }
-
         {
-            CompressSetTaskArgs args(idx, idx_left_sub_tree, idx_right_sub_tree, is_leaf);
+            CompressSetTaskArgs args(idx, idx_left_sub_tree, idx_right_sub_tree, left_node_value, right_node_value);
             TaskLauncher compress_set_task_launcher(COMPRESS_SET_TASK_ID, TaskArgument(&args, sizeof(CompressSetTaskArgs)));
             RegionRequirement req(lr, READ_WRITE, EXCLUSIVE, lr);
             req.add_field(FID_X);
@@ -435,7 +456,7 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions, Co
     // int node_value = read_acc[idx];
 
     // Before calling the recursive check if the current level of the root of your subtree is smaller than the max level
-    if ( ((is_refine == true && node_value == 0) || (is_refine == false && node_value != 0))&& n < max_depth ) {
+    if ( ((is_refine == true && node_value == 0) || (is_refine == false && node_value != 0)) && n < max_depth ) {
         lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);        
 
         coord_t idx_left_sub_tree = idx + 1;
