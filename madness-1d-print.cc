@@ -38,9 +38,11 @@ struct Arguments {
 
     Color partition_color;
 
+    bool is_refine;
+
     // Constructor
-    Arguments(int _n, int _l, int _max_depth, coord_t _idx, Color _partition_color)
-        : n(_n), l(_l), max_depth(_max_depth), idx(_idx), partition_color(_partition_color)
+    Arguments(int _n, int _l, int _max_depth, coord_t _idx, Color _partition_color, bool _is_refine = false)
+        : n(_n), l(_l), max_depth(_max_depth), idx(_idx), partition_color(_partition_color), is_refine(_is_refine)
     {}
 };
 
@@ -57,7 +59,8 @@ struct ReadTaskArgs {
 
 struct CompressSetTaskArgs {
     coord_t idx, left_idx, right_idx;
-    CompressSetTaskArgs(coord_t _idx, coord_t _left_idx, coord_t _right_idx) : idx(_idx), left_idx(_left_idx), right_idx(_right_idx){}
+    bool is_leaf;
+    CompressSetTaskArgs(coord_t _idx, coord_t _left_idx, coord_t _right_idx, bool _is_leaf = false) : idx(_idx), left_idx(_left_idx), right_idx(_right_idx), is_leaf(_is_leaf){}
 };
 
 //   k=1 (1 subregion per node)
@@ -110,7 +113,7 @@ void top_level_task(const Task *task,
     // Any random value will work
     Color partition_color = 10;
 
-    Arguments args(0, 0, max_depth, 0, partition_color);
+    Arguments args(0, 0, max_depth, 0, partition_color, true);
     srand48_r(seed, &args.gen);
 
     // Launching the refine task
@@ -131,7 +134,7 @@ void top_level_task(const Task *task,
     compress_launcher.add_field(0, FID_X);
     runtime->execute_task(ctx, compress_launcher);
 
-    // fprintf(stderr, "\n------------- after compressing ------------\n");
+    args.is_refine = false;
 
     // Launching another task to print the values of the binary tree nodes
     TaskLauncher print_launcher1(PRINT_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
@@ -214,6 +217,11 @@ void compress_set_task(const Task *task,
     const FieldAccessor<READ_WRITE, int, 1> write_acc(regions[0], FID_X);
     // fprintf(stderr, "left value %d right value %d\n", write_acc[args.left_idx], write_acc[args.right_idx]);
     write_acc[args.idx] = write_acc[args.left_idx] + write_acc[args.right_idx];
+    if (args.is_leaf == true) {
+        write_acc[args.left_idx] = 0;
+        write_acc[args.right_idx] = 0;
+    }
+    
 }
 
 
@@ -293,8 +301,8 @@ void refine_task(const Task *task, const std::vector<PhysicalRegion> &regions, C
         assert(lp != LogicalPartition::NO_PART);
         Rect<1> launch_domain(left_sub_tree_color, right_sub_tree_color);
         ArgumentMap arg_map;
-        Arguments for_left_sub_tree (n + 1, l * 2    , max_depth, idx_left_sub_tree, partition_color);
-        Arguments for_right_sub_tree(n + 1, l * 2 + 1, max_depth, idx_right_sub_tree, partition_color);
+        Arguments for_left_sub_tree (n + 1, l * 2    , max_depth, idx_left_sub_tree, partition_color, true);
+        Arguments for_right_sub_tree(n + 1, l * 2 + 1, max_depth, idx_right_sub_tree, partition_color, true);
 
         // Make sure two subtrees use different random number generators
         long int new_seed = 0L;
@@ -356,8 +364,8 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
         Rect<1> launch_domain(left_sub_tree_color, right_sub_tree_color);
         ArgumentMap arg_map;
 
-        Arguments for_left_sub_tree(n + 1, 2 * l, max_depth, idx_left_sub_tree, partition_color);
-        Arguments for_right_sub_tree(n + 1, 2 * l + 1, max_depth, idx_right_sub_tree, partition_color);
+        Arguments for_left_sub_tree(n + 1, 2 * l, max_depth, idx_left_sub_tree, partition_color, false);
+        Arguments for_right_sub_tree(n + 1, 2 * l + 1, max_depth, idx_right_sub_tree, partition_color, false);
 
         arg_map.set_point(left_sub_tree_color, TaskArgument(&for_left_sub_tree, sizeof(Arguments)));
         arg_map.set_point(right_sub_tree_color, TaskArgument(&for_right_sub_tree, sizeof(Arguments)));
@@ -368,15 +376,19 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
         compress_launcher.add_region_requirement(req);
         runtime->execute_index_space(ctxt, compress_launcher);
 
+        bool is_leaf = false;
+        if(n == max_depth - 1) {
+            is_leaf = true;
+        }
+
         {
-            CompressSetTaskArgs args(idx, idx_left_sub_tree, idx_right_sub_tree);
+            CompressSetTaskArgs args(idx, idx_left_sub_tree, idx_right_sub_tree, is_leaf);
             TaskLauncher compress_set_task_launcher(COMPRESS_SET_TASK_ID, TaskArgument(&args, sizeof(CompressSetTaskArgs)));
             RegionRequirement req(lr, READ_WRITE, EXCLUSIVE, lr);
             req.add_field(FID_X);
             compress_set_task_launcher.add_region_requirement(req);
             runtime->execute_task(ctxt, compress_set_task_launcher);
         }
-
     }
 
 
@@ -395,6 +407,8 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions, Co
     DomainPoint left_sub_tree_color(Point<1>(1LL));
     DomainPoint right_sub_tree_color(Point<1>(2LL));
     Color partition_color = args.partition_color;
+
+    bool is_refine = args.is_refine;
 
     coord_t idx = args.idx;
 
@@ -421,7 +435,7 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions, Co
     // int node_value = read_acc[idx];
 
     // Before calling the recursive check if the current level of the root of your subtree is smaller than the max level
-    if (node_value == 0 && n < max_depth) {
+    if ( ((is_refine == true && node_value == 0) || (is_refine == false && node_value != 0))&& n < max_depth ) {
         lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);        
 
         coord_t idx_left_sub_tree = idx + 1;
@@ -430,8 +444,8 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions, Co
         Rect<1> launch_domain(left_sub_tree_color, right_sub_tree_color);
         ArgumentMap arg_map;
 
-        Arguments for_left_sub_tree(n + 1, 2 * l, max_depth, idx_left_sub_tree, partition_color);
-        Arguments for_right_sub_tree(n + 1, 2 * l + 1, max_depth, idx_right_sub_tree, partition_color);
+        Arguments for_left_sub_tree(n + 1, 2 * l, max_depth, idx_left_sub_tree, partition_color, is_refine);
+        Arguments for_right_sub_tree(n + 1, 2 * l + 1, max_depth, idx_right_sub_tree, partition_color, is_refine);
 
         arg_map.set_point(left_sub_tree_color, TaskArgument(&for_left_sub_tree, sizeof(Arguments)));
         arg_map.set_point(right_sub_tree_color, TaskArgument(&for_right_sub_tree, sizeof(Arguments)));
