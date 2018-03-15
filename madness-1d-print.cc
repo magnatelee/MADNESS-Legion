@@ -436,12 +436,17 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions, Co
     LogicalRegion lr = regions[0].get_logical_region();
 
     LogicalPartition lp = LogicalPartition::NO_PART;
+    IndexSpace is = lr.get_index_space();
+
+    lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);
+
+    LogicalRegion my_sub_tree_lr = runtime->get_logical_subregion_by_color(ctxt, lp, my_sub_tree_color);
 
     Future f1;
     {
         ReadTaskArgs args(idx);
         TaskLauncher read_task_launcher(READ_TASK_ID, TaskArgument(&args, sizeof(ReadTaskArgs)));
-        RegionRequirement req(lr, READ_ONLY, EXCLUSIVE, lr);
+        RegionRequirement req(my_sub_tree_lr, READ_ONLY, EXCLUSIVE, lr);
         req.add_field(FID_X);
         read_task_launcher.add_region_requirement(req);
         f1 = runtime->execute_task(ctxt, read_task_launcher);
@@ -451,13 +456,13 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions, Co
 
     fprintf(stderr, "(n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
 
+
     // These lines will create an instance for the whole region even though we need only the first element
     // const FieldAccessor<READ_ONLY, int, 1> read_acc(regions[0], FID_X);
     // int node_value = read_acc[idx];
 
     // Before calling the recursive check if the current level of the root of your subtree is smaller than the max level
     if ( ((is_refine == true && node_value == 0) || (is_refine == false && node_value != 0)) && n < max_depth ) {
-        lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);        
 
         coord_t idx_left_sub_tree = idx + 1;
         coord_t idx_right_sub_tree = idx + static_cast<coord_t>(pow(2, max_depth - n));
