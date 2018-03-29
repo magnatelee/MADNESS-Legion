@@ -49,7 +49,9 @@ struct Arguments {
 struct SetTaskArgs {
     int node_value;
     coord_t idx;
-    SetTaskArgs(int _node_value, coord_t _idx) : node_value(_node_value), idx(_idx) {}
+    int n;
+    int max_depth;
+    SetTaskArgs(int _node_value, coord_t _idx, int _n, int _max_depth) : node_value(_node_value), idx(_idx), n(_n), max_depth(_max_depth) {}
 };
 
 struct ReadTaskArgs {
@@ -192,8 +194,8 @@ void set_task(const Task *task,
     SetTaskArgs args = *(const SetTaskArgs *) task->args;
     assert(regions.size() == 1);
     const FieldAccessor<WRITE_DISCARD, int, 1> write_acc(regions[0], FID_X);
-    if (args.node_value <= 3) {
-        write_acc[args.idx] = args.node_value;
+    if (args.node_value <= 3 || args.n == args.max_depth - 1) {
+        write_acc[args.idx] = args.node_value % 3 + 1;
     }
     else {
         write_acc[args.idx] = 0;
@@ -292,7 +294,7 @@ void refine_task(const Task *task, const std::vector<PhysicalRegion> &regions, C
     lrand48_r(&args.gen, &node_value);
     node_value = node_value % 10 + 1;
     {
-        SetTaskArgs args(node_value, idx);
+        SetTaskArgs args(node_value, idx, n, max_depth);
         TaskLauncher set_task_launcher(SET_TASK_ID, TaskArgument(&args, sizeof(SetTaskArgs)));
         RegionRequirement req(my_sub_tree_lr, WRITE_DISCARD, EXCLUSIVE, lr);
         req.add_field(FID_X);
@@ -462,7 +464,10 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions, Co
     // int node_value = read_acc[idx];
 
     // Before calling the recursive check if the current level of the root of your subtree is smaller than the max level
+    // if (runtime->has_index_partition(ctxt, is, partition_color)) {
     if ( ((is_refine == true && node_value == 0) || (is_refine == false && node_value != 0)) && n < max_depth ) {
+
+        fprintf(stderr, "entering inside the method (n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
 
         coord_t idx_left_sub_tree = idx + 1;
         coord_t idx_right_sub_tree = idx + static_cast<coord_t>(pow(2, max_depth - n));
