@@ -217,15 +217,22 @@ void compress_set_task(const Task *task,
                        Context ctx, HighLevelRuntime *runtime) {
 
     CompressSetTaskArgs args = *(const CompressSetTaskArgs *) task->args;
-    assert(regions.size() == 1);
+    assert(regions.size() == 3);
     const FieldAccessor<READ_WRITE, int, 1> write_acc(regions[0], FID_X);
+    const FieldAccessor<READ_WRITE, int, 1> write_acc_left(regions[1], FID_X);
+    const FieldAccessor<READ_WRITE, int, 1> write_acc_right(regions[2], FID_X);
 
-    write_acc[args.idx] = write_acc[args.left_idx] + write_acc[args.right_idx];
-    if (args.left_node_value == write_acc[args.left_idx]) {
-        write_acc[args.left_idx] = 0;
+    write_acc[args.idx] = write_acc_left[args.left_idx] + write_acc_right[args.right_idx];
+
+    // if(runtime->has_logical_subregion_by_color(ctx, regions[1], Point<1>(1LL)) == false &&  has_logical_subregion_by_color(ctx, regions[2], Point<1>(2LL)) == false) {
+    //     fprintf(stderr, "%s It is a leaf node 1\n");
+    // }
+
+    if (args.left_node_value == write_acc_left[args.left_idx]) {
+        write_acc_left[args.left_idx] = 0;
     }
-    if (args.right_node_value == write_acc[args.right_idx]) {
-        write_acc[args.right_idx] = 0;
+    if (args.right_node_value == write_acc_right[args.right_idx]) {
+        write_acc_right[args.right_idx] = 0;
     }
     
 }
@@ -344,16 +351,21 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
 
     assert(regions.size() == 1);
     LogicalRegion lr = regions[0].get_logical_region();
-    LogicalPartition lp = LogicalPartition::NO_PART;
+    LogicalPartition lp = LogicalPartition::NO_PART, lp1,lp2;
 
     coord_t idx_left_sub_tree = 0LL;
     coord_t idx_right_sub_tree = 0LL;
+
+    lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);
+    LogicalRegion my_sub_tree_lr = runtime->get_logical_subregion_by_color(ctxt, lp, my_sub_tree_color);
+    LogicalRegion left_sub_tree_lr = runtime->get_logical_subregion_by_color(ctxt, lp, left_sub_tree_color);
+    LogicalRegion right_sub_tree_lr = runtime->get_logical_subregion_by_color(ctxt, lp, right_sub_tree_color);
 
     Future f1;
     {
         ReadTaskArgs args(idx);
         TaskLauncher read_task_launcher(READ_TASK_ID, TaskArgument(&args, sizeof(ReadTaskArgs)));
-        RegionRequirement req(lr, READ_ONLY, EXCLUSIVE, lr);
+        RegionRequirement req(my_sub_tree_lr, READ_ONLY, EXCLUSIVE, lr);
         req.add_field(FID_X);
         read_task_launcher.add_region_requirement(req);
         f1 = runtime->execute_task(ctxt, read_task_launcher);
@@ -363,7 +375,7 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
     {
         ReadTaskArgs args(idx + 1);
         TaskLauncher read_task_launcher_left(READ_TASK_ID, TaskArgument(&args, sizeof(ReadTaskArgs)));
-        RegionRequirement req(lr, READ_ONLY, EXCLUSIVE, lr);
+        RegionRequirement req(left_sub_tree_lr, READ_ONLY, EXCLUSIVE, lr);
         req.add_field(FID_X);
         read_task_launcher_left.add_region_requirement(req);
         f_left = runtime->execute_task(ctxt, read_task_launcher_left);
@@ -373,7 +385,7 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
     {
         ReadTaskArgs args(idx + static_cast<coord_t>(pow(2, max_depth - n)));
         TaskLauncher read_task_launcher_right(READ_TASK_ID, TaskArgument(&args, sizeof(ReadTaskArgs)));
-        RegionRequirement req(lr, READ_ONLY, EXCLUSIVE, lr);
+        RegionRequirement req(right_sub_tree_lr, READ_ONLY, EXCLUSIVE, lr);
         req.add_field(FID_X);
         read_task_launcher_right.add_region_requirement(req);
         f_right = runtime->execute_task(ctxt, read_task_launcher_right);
@@ -384,7 +396,12 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
     int right_node_value = f_right.get_result<int>();
 
     if (node_value == 0 && n < max_depth) {
-        lp = runtime->get_logical_partition_by_color(ctxt, lr, partition_color);        
+
+        lp1 = runtime->get_logical_partition_by_color(ctxt, left_sub_tree_lr, partition_color);
+        lp2 = runtime->get_logical_partition_by_color(ctxt, right_sub_tree_lr, partition_color);
+        LogicalRegion root_left_sub_tree_lr = runtime->get_logical_subregion_by_color(ctxt, lp1, my_sub_tree_color);
+        LogicalRegion root_right_sub_tree_lr = runtime->get_logical_subregion_by_color(ctxt, lp2, my_sub_tree_color);
+
 
         idx_left_sub_tree = idx + 1;
         idx_right_sub_tree = idx + static_cast<coord_t>(pow(2, max_depth - n));
@@ -404,12 +421,20 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
         compress_launcher.add_region_requirement(req);
         runtime->execute_index_space(ctxt, compress_launcher);
 
+        LogicalRegion my_sub_tree_lr = runtime->get_logical_subregion_by_color(ctxt, lp, my_sub_tree_color);
+
         {
             CompressSetTaskArgs args(idx, idx_left_sub_tree, idx_right_sub_tree, left_node_value, right_node_value);
             TaskLauncher compress_set_task_launcher(COMPRESS_SET_TASK_ID, TaskArgument(&args, sizeof(CompressSetTaskArgs)));
-            RegionRequirement req(lr, READ_WRITE, EXCLUSIVE, lr);
+            RegionRequirement req(my_sub_tree_lr, READ_WRITE, EXCLUSIVE, lr);
+            RegionRequirement req_left(root_left_sub_tree_lr, READ_WRITE, EXCLUSIVE, lr);
+            RegionRequirement req_right(root_right_sub_tree_lr, READ_WRITE, EXCLUSIVE, lr);
             req.add_field(FID_X);
+            req_left.add_field(FID_X);
+            req_right.add_field(FID_X);
             compress_set_task_launcher.add_region_requirement(req);
+            compress_set_task_launcher.add_region_requirement(req_left);
+            compress_set_task_launcher.add_region_requirement(req_right);
             runtime->execute_task(ctxt, compress_set_task_launcher);
         }
     }
@@ -464,10 +489,10 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions, Co
     // int node_value = read_acc[idx];
 
     // Before calling the recursive check if the current level of the root of your subtree is smaller than the max level
-    // if (runtime->has_index_partition(ctxt, is, partition_color)) {
+    // if (runtime->has_logical_partition_by_color(ctxt, lr, partition_color)) {
     if ( ((is_refine == true && node_value == 0) || (is_refine == false && node_value != 0)) && n < max_depth ) {
 
-        fprintf(stderr, "entering inside the method (n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
+        // fprintf(stderr, "entering inside the method (n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
 
         coord_t idx_left_sub_tree = idx + 1;
         coord_t idx_right_sub_tree = idx + static_cast<coord_t>(pow(2, max_depth - n));
