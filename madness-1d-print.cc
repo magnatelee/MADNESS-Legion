@@ -109,33 +109,29 @@ void top_level_task(const Task *task,
         allocator.allocate_field(sizeof(int), FID_X);
     }
 
-    LogicalRegion lr = runtime->create_logical_region(ctx, is, fs);
-
-    DomainPoint my_sub_tree_color(Point<1>(0LL));
-    DomainPoint left_sub_tree_color(Point<1>(1LL));
-    DomainPoint right_sub_tree_color(Point<1>(2LL));
-
+    // For 1 logical region
+    LogicalRegion lr1 = runtime->create_logical_region(ctx, is, fs);
     // Any random value will work
-    Color partition_color = 10;
+    Color partition_color1 = 10;
 
-    Arguments args(0, 0, max_depth, 0, partition_color, true);
+    Arguments args(0, 0, max_depth, 0, partition_color1, true);
     srand48_r(seed, &args.gen);
 
     // Launching the refine task
     TaskLauncher refine_launcher(REFINE_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
-    refine_launcher.add_region_requirement(RegionRequirement(lr, WRITE_DISCARD, EXCLUSIVE, lr));
+    refine_launcher.add_region_requirement(RegionRequirement(lr1, WRITE_DISCARD, EXCLUSIVE, lr1));
     refine_launcher.add_field(0, FID_X);
     runtime->execute_task(ctx, refine_launcher);
 
     // Launching another task to print the values of the binary tree nodes
     TaskLauncher print_launcher(PRINT_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
-    print_launcher.add_region_requirement(RegionRequirement(lr, READ_ONLY, EXCLUSIVE, lr));
+    print_launcher.add_region_requirement(RegionRequirement(lr1, READ_ONLY, EXCLUSIVE, lr1));
     print_launcher.add_field(0, FID_X);
     runtime->execute_task(ctx, print_launcher);
 
     // Launching another task to print the values of the binary tree nodes
     TaskLauncher compress_launcher(COMPRESS_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
-    compress_launcher.add_region_requirement(RegionRequirement(lr, READ_WRITE, EXCLUSIVE, lr));
+    compress_launcher.add_region_requirement(RegionRequirement(lr1, READ_WRITE, EXCLUSIVE, lr1));
     compress_launcher.add_field(0, FID_X);
     runtime->execute_task(ctx, compress_launcher);
 
@@ -143,12 +139,58 @@ void top_level_task(const Task *task,
 
     // Launching another task to print the values of the binary tree nodes
     TaskLauncher print_launcher1(PRINT_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
-    print_launcher1.add_region_requirement(RegionRequirement(lr, READ_ONLY, EXCLUSIVE, lr));
+    print_launcher1.add_region_requirement(RegionRequirement(lr1, READ_ONLY, EXCLUSIVE, lr1));
     print_launcher1.add_field(0, FID_X);
     runtime->execute_task(ctx, print_launcher1);
 
+    // For 2nd logical region
+    LogicalRegion lr2 = runtime->create_logical_region(ctx, is, fs);
+    // Any random value will work
+    Color partition_color2 = 20;
+
+    Arguments args(0, 0, max_depth, 0, partition_color2, true);
+    srand48_r(seed, &args.gen);
+
+    // Launching the refine task
+    TaskLauncher refine_launcher(REFINE_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
+    refine_launcher.add_region_requirement(RegionRequirement(lr2, WRITE_DISCARD, EXCLUSIVE, lr2));
+    refine_launcher.add_field(0, FID_X);
+    runtime->execute_task(ctx, refine_launcher);
+
+    // Launching another task to print the values of the binary tree nodes
+    TaskLauncher print_launcher(PRINT_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
+    print_launcher.add_region_requirement(RegionRequirement(lr2, READ_ONLY, EXCLUSIVE, lr2));
+    print_launcher.add_field(0, FID_X);
+    runtime->execute_task(ctx, print_launcher);
+
+    // Launching another task to compress the values of the binary tree nodes
+    TaskLauncher compress_launcher(COMPRESS_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
+    compress_launcher.add_region_requirement(RegionRequirement(lr2, READ_WRITE, EXCLUSIVE, lr2));
+    compress_launcher.add_field(0, FID_X);
+    runtime->execute_task(ctx, compress_launcher);
+
+    args.is_refine = false;
+
+    // Launching another task to print the values of the binary tree nodes
+    TaskLauncher print_launcher1(PRINT_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
+    print_launcher1.add_region_requirement(RegionRequirement(lr2, READ_ONLY, EXCLUSIVE, lr2));
+    print_launcher1.add_field(0, FID_X);
+    runtime->execute_task(ctx, print_launcher1);
+
+    // For 3rd logical region
+    LogicalRegion lr2 = runtime->create_logical_region(ctx, is, fs);
+
+    // Gaxpy operator
+    TaskLauncher gaxpy_launcher(GAXPY_TASK_ID, TaskArgument(&args, sizeof(Arguments)));
+    gaxpy_launcher.add_region_requirement(RegionRequirement(lr1, READ_ONLY, EXCLUSIVE, lr1));
+    gaxpy_launcher.add_region_requirement(RegionRequirement(lr2, READ_ONLY, EXCLUSIVE, lr2));
+    gaxpy_launcher.add_region_requirement(RegionRequirement(lr3, WRITE_DISCARD, EXCLUSIVE, lr2));
+    gaxpy_launcher.add_field(0, FID_X);
+    runtime->execute_task(ctx, gaxpy_launcher);
+
     // Destroying allocated memory
-    runtime->destroy_logical_region(ctx, lr);
+    runtime->destroy_logical_region(ctx, lr1);
+    runtime->destroy_logical_region(ctx, lr2);
     runtime->destroy_field_space(ctx, fs);
     runtime->destroy_index_space(ctx, is);
 }
@@ -347,6 +389,7 @@ void refine_task(const Task *task, const std::vector<PhysicalRegion> &regions, C
     }
 }
 
+
 void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions, Context ctxt, HighLevelRuntime *runtime) {
     Arguments args = task->is_index_space ? *(const Arguments *) task->local_args
     : *(const Arguments *) task->args;
@@ -452,8 +495,10 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
             runtime->execute_task(ctxt, compress_set_task_launcher);
         }
     }
+}
 
-
+void gaxpy_task(const Task *task, const std::vector<PhysicalRegion> &regions, Context ctx, HighLevelRuntime *runtime) {
+    
 }
 
 void print_task(const Task *task, const std::vector<PhysicalRegion> &regions, Context ctxt, HighLevelRuntime *runtime) {
