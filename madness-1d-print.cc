@@ -62,9 +62,10 @@ struct ReadTaskArgs {
 struct CompressSetTaskArgs {
     coord_t idx, left_idx, right_idx;
     int left_node_value, right_node_value;
-    CompressSetTaskArgs(coord_t _idx, coord_t _left_idx, coord_t _right_idx, int _left_node_value, int _right_node_value) : 
+    Color partition_color;
+    CompressSetTaskArgs(coord_t _idx, coord_t _left_idx, coord_t _right_idx, int _left_node_value, int _right_node_value, Color _partition_color) : 
         idx(_idx), left_idx(_left_idx), right_idx(_right_idx), left_node_value(_left_node_value),
-        right_node_value(_right_node_value){}
+        right_node_value(_right_node_value), partition_color(_partition_color){}
 };
 
 //   k=1 (1 subregion per node)
@@ -224,11 +225,23 @@ void compress_set_task(const Task *task,
 
     write_acc[args.idx] = write_acc_left[args.left_idx] + write_acc_right[args.right_idx];
 
-    // if(runtime->has_logical_subregion_by_color(ctx, regions[1], Point<1>(1LL)) == false &&  has_logical_subregion_by_color(ctx, regions[2], Point<1>(2LL)) == false) {
-    //     fprintf(stderr, "%s It is a leaf node 1\n");
+    // LogicalRegion left_lr = regions[1].get_logical_region();
+    // LogicalRegion right_lr = regions[2].get_logical_region();
+
+    // LogicalPartition left_lp = LogicalPartition::NO_PART, right_lp = LogicalPartition::NO_PART;
+
+    // if (runtime->has_logical_partition_by_color(ctx, left_lr, args.partition_color) && runtime->has_logical_partition_by_color(ctx, right_lr, args.partition_color)){
+    //     fprintf(stderr, "I am coming here\n");
+    //     left_lp = runtime->get_logical_partition_by_color(ctx, left_lr, args.partition_color);
+    //     right_lp = runtime->get_logical_partition_by_color(ctx, right_lr, args.partition_color);
+    // }
+    
+    // if(left_lp != LogicalPartition::NO_PART && right_lp != LogicalPartition::NO_PART && runtime->has_logical_subregion_by_color(ctx, left_lp, Point<1>(1LL)) == false &&  runtime->has_logical_subregion_by_color(ctx, right_lp, Point<1>(2LL)) == false) {
+    //     fprintf(stderr, "It is a leaf node 1\n");
     // }
 
     if (args.left_node_value == write_acc_left[args.left_idx]) {
+        fprintf(stderr, "It is a leaf node 2\n");
         write_acc_left[args.left_idx] = 0;
     }
     if (args.right_node_value == write_acc_right[args.right_idx]) {
@@ -371,6 +384,7 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
         f1 = runtime->execute_task(ctxt, read_task_launcher);
     }
 
+    // After checking for left and right leaf nodes, we have to remove calling these future values
     Future f_left;
     {
         ReadTaskArgs args(idx + 1);
@@ -424,7 +438,7 @@ void compress_task(const Task *task, const std::vector<PhysicalRegion> &regions,
         LogicalRegion my_sub_tree_lr = runtime->get_logical_subregion_by_color(ctxt, lp, my_sub_tree_color);
 
         {
-            CompressSetTaskArgs args(idx, idx_left_sub_tree, idx_right_sub_tree, left_node_value, right_node_value);
+            CompressSetTaskArgs args(idx, idx_left_sub_tree, idx_right_sub_tree, left_node_value, right_node_value, partition_color);
             TaskLauncher compress_set_task_launcher(COMPRESS_SET_TASK_ID, TaskArgument(&args, sizeof(CompressSetTaskArgs)));
             RegionRequirement req(my_sub_tree_lr, READ_WRITE, EXCLUSIVE, lr);
             RegionRequirement req_left(root_left_sub_tree_lr, READ_WRITE, EXCLUSIVE, lr);
@@ -489,10 +503,10 @@ void print_task(const Task *task, const std::vector<PhysicalRegion> &regions, Co
     // int node_value = read_acc[idx];
 
     // Before calling the recursive check if the current level of the root of your subtree is smaller than the max level
-    // if (runtime->has_logical_partition_by_color(ctxt, lr, partition_color)) {
+    // if (runtime->has_index_partition(ctxt, is, partition_color)) {
     if ( ((is_refine == true && node_value == 0) || (is_refine == false && node_value != 0)) && n < max_depth ) {
 
-        // fprintf(stderr, "entering inside the method (n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
+        fprintf(stderr, "entering inside the method (n: %d, l: %d), idx: %lld, node_value: %d\n", n, l, idx, node_value);
 
         coord_t idx_left_sub_tree = idx + 1;
         coord_t idx_right_sub_tree = idx + static_cast<coord_t>(pow(2, max_depth - n));
