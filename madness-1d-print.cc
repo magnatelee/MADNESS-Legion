@@ -181,12 +181,12 @@ void top_level_task(const Task *task, const std::vector<PhysicalRegion> &regions
     InnerProductArguments args3(0, 0, min(left_max_depth, right_max_depth), 0, partition_color1, partition_color2);
 
     // Launching gaxpy task
-    TaskLauncher gaxpy_launcher(INNER_PRODUCT_TASK_ID, TaskArgument(&args3, sizeof(InnerProductArguments)));
-    gaxpy_launcher.add_region_requirement(RegionRequirement(lr1, READ_ONLY, EXCLUSIVE, lr1));
-    gaxpy_launcher.add_region_requirement(RegionRequirement(lr2, READ_ONLY, EXCLUSIVE, lr2));
-    gaxpy_launcher.add_field(0, FID_X);
-    gaxpy_launcher.add_field(1, FID_X);
-    Future f1 = runtime->execute_task(ctx, gaxpy_launcher);
+    TaskLauncher inner_product_launcher(INNER_PRODUCT_TASK_ID, TaskArgument(&args3, sizeof(InnerProductArguments)));
+    inner_product_launcher.add_region_requirement(RegionRequirement(lr1, READ_ONLY, EXCLUSIVE, lr1));
+    inner_product_launcher.add_region_requirement(RegionRequirement(lr2, READ_ONLY, EXCLUSIVE, lr2));
+    inner_product_launcher.add_field(0, FID_X);
+    inner_product_launcher.add_field(1, FID_X);
+    Future f1 = runtime->execute_task(ctx, inner_product_launcher);
 
     fprintf(stderr, "inner product result %d\n", f1.get_result<int>());
 
@@ -474,10 +474,13 @@ int inner_product_task(const Task *task, const std::vector<PhysicalRegion> &regi
 
     LogicalRegion my_sub_tree_lr1 = LogicalRegion::NO_REGION;
     LogicalRegion left_sub_tree_lr1 = LogicalRegion::NO_REGION;
+    LogicalRegion right_sub_tree_lr1 = LogicalRegion::NO_REGION;
     LogicalRegion my_sub_tree_lr2 = LogicalRegion::NO_REGION;
     LogicalRegion left_sub_tree_lr2 = LogicalRegion::NO_REGION;
+    LogicalRegion right_sub_tree_lr2 = LogicalRegion::NO_REGION;
 
-    IndexSpace indexspace_tree1 = IndexSpace::NO_SPACE, indexspace_tree2 = IndexSpace::NO_SPACE;
+    IndexSpace indexspace_tree_left1 = IndexSpace::NO_SPACE, indexspace_tree_left2 = IndexSpace::NO_SPACE;
+    IndexSpace indexspace_tree_right1 = IndexSpace::NO_SPACE, indexspace_tree_right2 = IndexSpace::NO_SPACE;
 
     if (n >= max_depth)
         return 0;
@@ -485,13 +488,18 @@ int inner_product_task(const Task *task, const std::vector<PhysicalRegion> &regi
     lp1 = runtime->get_logical_partition_by_color(ctx, lr1, partition_color1);
     my_sub_tree_lr1 = runtime->get_logical_subregion_by_color(ctx, lp1, my_sub_tree_color);
     left_sub_tree_lr1 = runtime->get_logical_subregion_by_color(ctx, lp1, left_sub_tree_color);
+    right_sub_tree_lr1 = runtime->get_logical_subregion_by_color(ctx, lp1, right_sub_tree_color);
 
     lp2 = runtime->get_logical_partition_by_color(ctx, lr2, partition_color2);
     my_sub_tree_lr2 = runtime->get_logical_subregion_by_color(ctx, lp2, my_sub_tree_color);
     left_sub_tree_lr2 = runtime->get_logical_subregion_by_color(ctx, lp2, left_sub_tree_color);
+    right_sub_tree_lr2 = runtime->get_logical_subregion_by_color(ctx, lp2, right_sub_tree_color);
 
-    indexspace_tree1 = left_sub_tree_lr1.get_index_space();
-    indexspace_tree2 = left_sub_tree_lr2.get_index_space();
+    indexspace_tree_left1 = left_sub_tree_lr1.get_index_space();
+    indexspace_tree_left2 = left_sub_tree_lr2.get_index_space();
+
+    indexspace_tree_right1 = right_sub_tree_lr1.get_index_space();
+    indexspace_tree_right2 = right_sub_tree_lr2.get_index_space();
 
     Future f_left;
     {
@@ -515,36 +523,49 @@ int inner_product_task(const Task *task, const std::vector<PhysicalRegion> &regi
 
     int sum = f_left.get_result<int>() * f_right.get_result<int>();
 
-    if ((indexspace_tree1 != IndexSpace::NO_SPACE && runtime->has_index_partition(ctx, indexspace_tree1, partition_color1)) && 
-        (indexspace_tree2 != IndexSpace::NO_SPACE && runtime->has_index_partition(ctx, indexspace_tree2, partition_color2)) ) {
+    fprintf(stderr, "multiplying %d, %d\n", f_left.get_result<int>(), f_right.get_result<int>());
+
+    int left_value = 0, right_value = 0;
+
+    if ((indexspace_tree_left1 != IndexSpace::NO_SPACE && runtime->has_index_partition(ctx, indexspace_tree_left1, partition_color1)) && 
+        (indexspace_tree_left2 != IndexSpace::NO_SPACE && runtime->has_index_partition(ctx, indexspace_tree_left2, partition_color2)) ) {
 
         idx_left_sub_tree = idx + 1;
-        idx_right_sub_tree = idx + static_cast<coord_t>(pow(2, max_depth - n));
-
         assert(lp2 != LogicalPartition::NO_PART);
         assert(lp1 != LogicalPartition::NO_PART);
-        Rect<1> launch_domain(left_sub_tree_color, right_sub_tree_color);
-        ArgumentMap arg_map;
-        InnerProductArguments for_left_sub_tree (n + 1, l * 2    , max_depth, idx_left_sub_tree, partition_color1, partition_color2);
-        InnerProductArguments for_right_sub_tree(n + 1, l * 2 + 1, max_depth, idx_right_sub_tree, partition_color1, partition_color2);
+        InnerProductArguments for_left_sub_tree (n + 1, l * 2, max_depth, idx_left_sub_tree, partition_color1, partition_color2);
 
-        arg_map.set_point(left_sub_tree_color, TaskArgument(&for_left_sub_tree, sizeof(InnerProductArguments)));
-        arg_map.set_point(right_sub_tree_color, TaskArgument(&for_right_sub_tree, sizeof(InnerProductArguments)));
-
-        IndexTaskLauncher inner_product_launcher(INNER_PRODUCT_TASK_ID, launch_domain, TaskArgument(NULL, 0), arg_map);
-        RegionRequirement req1(lp1, 0, READ_ONLY, EXCLUSIVE, lr1);
-        RegionRequirement req2(lp2, 0, READ_ONLY, EXCLUSIVE, lr2);
+        TaskLauncher inner_product_launcher(INNER_PRODUCT_TASK_ID, TaskArgument(&for_left_sub_tree, sizeof(InnerProductArguments)));
+        RegionRequirement req1(lr1, READ_ONLY, EXCLUSIVE, lr1);
+        RegionRequirement req2(lr2, READ_ONLY, EXCLUSIVE, lr2);
         req1.add_field(FID_X);
         req2.add_field(FID_X);
         inner_product_launcher.add_region_requirement(req1);
         inner_product_launcher.add_region_requirement(req2);
-        FutureMap f_result = runtime->execute_index_space(ctx, inner_product_launcher);
-        f_result.wait_all_results();
-
-        return ( sum + f_result.get_result<int>(left_sub_tree_color) + f_result.get_result<int>(right_sub_tree_color));
+        Future f_result_left = runtime->execute_task(ctx, inner_product_launcher);
+        left_value = f_result_left.get_result<int>();
     }
 
-    return suma;
+    if ((indexspace_tree_right1 != IndexSpace::NO_SPACE && runtime->has_index_partition(ctx, indexspace_tree_right1, partition_color1)) && 
+        (indexspace_tree_right2 != IndexSpace::NO_SPACE && runtime->has_index_partition(ctx, indexspace_tree_right2, partition_color2)) ) {
+
+        idx_right_sub_tree = idx + static_cast<coord_t>(pow(2, max_depth - n));
+        assert(lp2 != LogicalPartition::NO_PART);
+        assert(lp1 != LogicalPartition::NO_PART);
+        InnerProductArguments for_right_sub_tree(n + 1, l * 2 + 1, max_depth, idx_right_sub_tree, partition_color1, partition_color2);
+
+        TaskLauncher inner_product_launcher(INNER_PRODUCT_TASK_ID, TaskArgument(&for_right_sub_tree, sizeof(InnerProductArguments)));
+        RegionRequirement req1(lr1, READ_ONLY, EXCLUSIVE, lr1);
+        RegionRequirement req2(lr2, READ_ONLY, EXCLUSIVE, lr2);
+        req1.add_field(FID_X);
+        req2.add_field(FID_X);
+        inner_product_launcher.add_region_requirement(req1);
+        inner_product_launcher.add_region_requirement(req2);
+        Future f_result_right = runtime->execute_task(ctx, inner_product_launcher);
+        right_value = f_result_right.get_result<int>();
+    }
+
+    return sum + left_value + right_value;
 }
 
 
